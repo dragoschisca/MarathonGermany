@@ -1,19 +1,9 @@
-#!/usr/bin/env python3
-"""
-restore_qr.py
-Script pentru a restaura un QR corupt și a încerca să-l decodăm.
-Input: distorted_qr.png (în același folder)
-Output: fișiere intermediare salvate + orice text decodat tip "flag".
-"""
-
 import os
 import cv2
 import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance
 from skimage.restoration import denoise_bilateral
-from skimage.filters import threshold_otsu
 import imutils
-from scipy import ndimage as ndi
 
 IN = "distorted_qr.png"
 OUT_DIR = "restoration_outputs"
@@ -35,7 +25,6 @@ def save(img, name):
     print("Saved:", path)
 
 def try_decode_cv2(img):
-    # cv2.QRCodeDetector
     qrDecoder = cv2.QRCodeDetector()
     data, points, straight_qrcode = qrDecoder.detectAndDecode(img)
     if isinstance(data, str) and len(data) > 0:
@@ -43,7 +32,6 @@ def try_decode_cv2(img):
     return None
 
 def try_decode_pyzbar(img):
-    # pyzbar wants grayscale PIL or numpy
     pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     decoded = try_decode(img)
     if decoded:
@@ -51,7 +39,6 @@ def try_decode_pyzbar(img):
     return None
 
 def enhance_image_pil(img_bgr):
-    # Convert to PIL, apply simple enhancements (contrast, sharpen)
     pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
     pil = pil.filter(ImageFilter.MedianFilter(size=3))
     pil = ImageEnhance.Sharpness(pil).enhance(1.5)
@@ -59,19 +46,15 @@ def enhance_image_pil(img_bgr):
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
 def adaptive_threshold_and_morph(img_gray):
-    # denoise with bilateral (preserve edges)
     den = denoise_bilateral(img_gray, sigma_color=0.05, sigma_spatial=15, multichannel=False)
     den = (den * 255).astype(np.uint8)
-    # adaptive threshold
     th = cv2.adaptiveThreshold(den, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                cv2.THRESH_BINARY, 25, 8)
-    # morphological close to fill gaps
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
     mor = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel, iterations=2)
     return mor
 
 def find_qr_like_contour(binary):
-    # find large square-ish contours
     contours = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = imutils.grab_contours(contours)
     candidates = []
@@ -85,12 +68,10 @@ def find_qr_like_contour(binary):
             candidates.append((area, approx))
     candidates.sort(key=lambda x: -x[0])
     if candidates:
-        # return biggest quadrilateral
         return candidates[0][1].reshape(4,2)
     return None
 
 def four_point_transform(image, pts):
-    # order points and warp
     rect = imutils.perspective.order_points(pts)
     (tl, tr, br, bl) = rect
     widthA = np.linalg.norm(br - bl)
@@ -109,14 +90,12 @@ def four_point_transform(image, pts):
     return warp
 
 def upscale(img, scale=2):
-    # basic OpenCV pyrUp upscale (fast). If dnn_superres available, better.
     up = img.copy()
     for _ in range(int(np.log2(scale)) if scale>1 else 0):
         up = cv2.pyrUp(up)
     return up
 
 def inpaint_using_mask(img_gray, mask):
-    # inpaint to fill small holes
     color = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
     inpainted = cv2.inpaint(color, mask, 3, cv2.INPAINT_TELEA)
     return cv2.cvtColor(inpainted, cv2.COLOR_BGR2GRAY)
@@ -124,7 +103,6 @@ def inpaint_using_mask(img_gray, mask):
 def pipeline_attempts(img_bgr):
     results = []
 
-    # 1) basic enhance + try decode
     e1 = enhance_image_pil(img_bgr)
     save(e1, "enhanced_step1.png")
     res = try_decode_cv2(e1)
@@ -134,13 +112,11 @@ def pipeline_attempts(img_bgr):
     if res2:
         results.append(("pyzbar_enhance", res2))
 
-    # 2) grayscale + adaptive threshold + morph
     gray = cv2.cvtColor(e1, cv2.COLOR_BGR2GRAY)
     save(gray, "gray_after_enhance.png")
     thr = adaptive_threshold_and_morph(gray)
     save(cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR), "adaptive_threshold.png")
 
-    # try decode on thresholded image (convert to BGR)
     res = try_decode_cv2(cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR))
     if res:
         results.append(("cv2_thresh", res))
@@ -148,12 +124,10 @@ def pipeline_attempts(img_bgr):
     if res2:
         results.append(("pyzbar_thresh", res2))
 
-    # 3) try find largest quadrilateral and warp
     quad = find_qr_like_contour(thr)
     if quad is not None:
         warped = four_point_transform(img_bgr, quad)
         save(warped, "warped_from_quad.png")
-        # further enhance and threshold
         warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
         t2 = cv2.adaptiveThreshold(warped_gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
                                    cv2.THRESH_BINARY, 21, 6)
@@ -165,7 +139,6 @@ def pipeline_attempts(img_bgr):
         if res2:
             results.append(("pyzbar_warp", res2))
 
-        # upscale + blur removal
         up = upscale(warped, scale=2)
         save(up, "warped_upscaled.png")
         res = try_decode_cv2(up)
@@ -175,15 +148,12 @@ def pipeline_attempts(img_bgr):
         if res2:
             results.append(("pyzbar_warp_up", res2))
 
-    # 4) morphological mask + inpaint
-    # build mask of damaged regions (small black holes inside white areas or vice versa)
     inv = cv2.bitwise_not(thr)
-    # find small components (noise) to inpaint
     nb_components, output, stats, centroids = cv2.connectedComponentsWithStats(inv, connectivity=8)
     mask = np.zeros_like(inv)
     for i in range(1, nb_components):
         area = stats[i, cv2.CC_STAT_AREA]
-        if area < 500:  # tune this threshold if many small damages exist
+        if area < 500:
             mask[output == i] = 255
     save(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), "inpaint_mask.png")
     if mask.sum() > 0:
@@ -196,7 +166,6 @@ def pipeline_attempts(img_bgr):
         if res2:
             results.append(("pyzbar_inpaint", res2))
 
-    # 5) morphological opening to emphasize finder patterns (big square patterns)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
     opened = cv2.morphologyEx(thr, cv2.MORPH_OPEN, kernel, iterations=1)
     save(cv2.cvtColor(opened, cv2.COLOR_GRAY2BGR), "opened.png")
@@ -207,7 +176,6 @@ def pipeline_attempts(img_bgr):
     if res2:
         results.append(("pyzbar_open", res2))
 
-    # 6) try Canny + Hough or contours to detect alignment and deskew
     edges = cv2.Canny(gray, 50, 150)
     lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=100, maxLineGap=10)
     if lines is not None and len(lines) > 0:
@@ -217,7 +185,6 @@ def pipeline_attempts(img_bgr):
             angle = np.degrees(np.arctan2((y2-y1),(x2-x1)))
             angles.append(angle)
         median_angle = np.median(angles)
-        # rotate to deskew
         deskew = imutils.rotate_bound(img_bgr, -median_angle)
         save(deskew, "deskewed.png")
         res = try_decode_cv2(deskew)
@@ -241,10 +208,8 @@ def main():
     print("Imagine încărcată:", IN)
     save(img, "original.png")
 
-    # Run full pipeline
     results = pipeline_attempts(img)
 
-    # Unique results
     found = {}
     for tag, res in results:
         if isinstance(res, list):
