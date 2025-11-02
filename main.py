@@ -5,26 +5,40 @@ from PIL import Image, ImageFilter, ImageEnhance
 from skimage.restoration import denoise_bilateral
 import imutils
 
-IN = "distorted_qr.png"
-OUT_DIR = "restoration_outputs"
+# ==== Configurație fișiere ====
+IN = "distorted_qr.png"          # imaginea QR distorsionată de procesat
+OUT_DIR = "restoration_outputs"  # unde salvăm imaginile intermediare și finale
 os.makedirs(OUT_DIR, exist_ok=True)
 
+# ==== Funcție de decodare simplă cu OpenCV ====
 def try_decode(img):
+    """
+    Încearcă să decodeze QR-ul folosind OpenCV QRCodeDetector.
+    Returnează textul decodat sau None dacă nu se detectează nimic.
+    """
     qr = cv2.QRCodeDetector()
     data, points, _ = qr.detectAndDecode(img)
     if data:
-        print("✅ QR decoded:", data)
+        print("QR decoded:", data)
         return data
     else:
-        print("❌ QR not detected.")
+        print("QR not detected.")
         return None
 
+# ==== Funcție pentru salvarea imaginilor intermediare ====
 def save(img, name):
+    """
+    Salvează imaginea în OUT_DIR și afișează path-ul.
+    """
     path = os.path.join(OUT_DIR, name)
     cv2.imwrite(path, img)
     print("Saved:", path)
 
+# ==== Alte variante de decodare ====
 def try_decode_cv2(img):
+    """
+    Decodare QR cu OpenCV, returnează text dacă există.
+    """
     qrDecoder = cv2.QRCodeDetector()
     data, points, straight_qrcode = qrDecoder.detectAndDecode(img)
     if isinstance(data, str) and len(data) > 0:
@@ -32,13 +46,25 @@ def try_decode_cv2(img):
     return None
 
 def try_decode_pyzbar(img):
+    """
+    Convertim imaginea la PIL și încercăm decodare QR.
+    Aici, folosim doar funcția try_decode pentru demo.
+    """
     pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     decoded = try_decode(img)
     if decoded:
         return [d.data.decode("utf-8", errors="ignore") for d in decoded]
     return None
 
+# ==== Funcții de procesare imagine ====
 def enhance_image_pil(img_bgr):
+    """
+    Îmbunătățim imaginea:
+    - Filtru median
+    - Sharpness
+    - Contrast
+    Returnează imaginea îmbunătățită
+    """
     pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
     pil = pil.filter(ImageFilter.MedianFilter(size=3))
     pil = ImageEnhance.Sharpness(pil).enhance(1.5)
@@ -46,6 +72,10 @@ def enhance_image_pil(img_bgr):
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
 def adaptive_threshold_and_morph(img_gray):
+    """
+    Denoise bilateral + threshold adaptiv + morfologie close
+    pentru a evidenția structura QR-ului.
+    """
     den = denoise_bilateral(img_gray, sigma_color=0.05, sigma_spatial=15, multichannel=False)
     den = (den * 255).astype(np.uint8)
     th = cv2.adaptiveThreshold(den, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -55,6 +85,10 @@ def adaptive_threshold_and_morph(img_gray):
     return mor
 
 def find_qr_like_contour(binary):
+    """
+    Găsește contururi patrulatere mari care seamănă cu un QR.
+    Returnează 4 puncte dacă găsește ceva relevant.
+    """
     contours = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = imutils.grab_contours(contours)
     candidates = []
@@ -72,6 +106,9 @@ def find_qr_like_contour(binary):
     return None
 
 def four_point_transform(image, pts):
+    """
+    Transformare perspectivă pentru a "aplatiza" QR-ul.
+    """
     rect = imutils.perspective.order_points(pts)
     (tl, tr, br, bl) = rect
     widthA = np.linalg.norm(br - bl)
@@ -90,40 +127,50 @@ def four_point_transform(image, pts):
     return warp
 
 def upscale(img, scale=2):
+    """
+    Upscale imagine prin pyrUp pentru a ajuta decodarea.
+    """
     up = img.copy()
     for _ in range(int(np.log2(scale)) if scale>1 else 0):
         up = cv2.pyrUp(up)
     return up
 
 def inpaint_using_mask(img_gray, mask):
+    """
+    Inpainting folosind masca pentru a elimina zgomotele mici.
+    """
     color = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
     inpainted = cv2.inpaint(color, mask, 3, cv2.INPAINT_TELEA)
     return cv2.cvtColor(inpainted, cv2.COLOR_BGR2GRAY)
 
+# ==== Pipeline principal ====
 def pipeline_attempts(img_bgr):
+    """
+    Aici se aplică toate metodele de restaurare și decodare
+    pas cu pas, salvând imaginile intermediare.
+    """
     results = []
 
+    # 1. Enhancare imagine
     e1 = enhance_image_pil(img_bgr)
     save(e1, "enhanced_step1.png")
     res = try_decode_cv2(e1)
-    if res:
-        results.append(("cv2_enhance", res))
+    if res: results.append(("cv2_enhance", res))
     res2 = try_decode_pyzbar(e1)
-    if res2:
-        results.append(("pyzbar_enhance", res2))
+    if res2: results.append(("pyzbar_enhance", res2))
 
+    # 2. Convertim în grayscale și threshold
     gray = cv2.cvtColor(e1, cv2.COLOR_BGR2GRAY)
     save(gray, "gray_after_enhance.png")
     thr = adaptive_threshold_and_morph(gray)
     save(cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR), "adaptive_threshold.png")
 
     res = try_decode_cv2(cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR))
-    if res:
-        results.append(("cv2_thresh", res))
+    if res: results.append(("cv2_thresh", res))
     res2 = try_decode_pyzbar(cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR))
-    if res2:
-        results.append(("pyzbar_thresh", res2))
+    if res2: results.append(("pyzbar_thresh", res2))
 
+    # 3. Detectăm contur QR și facem warp
     quad = find_qr_like_contour(thr)
     if quad is not None:
         warped = four_point_transform(img_bgr, quad)
@@ -133,21 +180,19 @@ def pipeline_attempts(img_bgr):
                                    cv2.THRESH_BINARY, 21, 6)
         save(cv2.cvtColor(t2, cv2.COLOR_GRAY2BGR), "warped_threshold.png")
         res = try_decode_cv2(warped)
-        if res:
-            results.append(("cv2_warp", res))
+        if res: results.append(("cv2_warp", res))
         res2 = try_decode_pyzbar(warped)
-        if res2:
-            results.append(("pyzbar_warp", res2))
+        if res2: results.append(("pyzbar_warp", res2))
 
+        # Upscale
         up = upscale(warped, scale=2)
         save(up, "warped_upscaled.png")
         res = try_decode_cv2(up)
-        if res:
-            results.append(("cv2_warp_up", res))
+        if res: results.append(("cv2_warp_up", res))
         res2 = try_decode_pyzbar(up)
-        if res2:
-            results.append(("pyzbar_warp_up", res2))
+        if res2: results.append(("pyzbar_warp_up", res2))
 
+    # 4. Inpainting zgomote mici
     inv = cv2.bitwise_not(thr)
     nb_components, output, stats, centroids = cv2.connectedComponentsWithStats(inv, connectivity=8)
     mask = np.zeros_like(inv)
@@ -160,22 +205,20 @@ def pipeline_attempts(img_bgr):
         inpainted = inpaint_using_mask(gray, mask)
         save(cv2.cvtColor(inpainted, cv2.COLOR_GRAY2BGR), "inpainted.png")
         res = try_decode_cv2(cv2.cvtColor(inpainted, cv2.COLOR_GRAY2BGR))
-        if res:
-            results.append(("cv2_inpaint", res))
+        if res: results.append(("cv2_inpaint", res))
         res2 = try_decode_pyzbar(cv2.cvtColor(inpainted, cv2.COLOR_GRAY2BGR))
-        if res2:
-            results.append(("pyzbar_inpaint", res2))
+        if res2: results.append(("pyzbar_inpaint", res2))
 
+    # 5. Morfologie open pentru zgomot
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
     opened = cv2.morphologyEx(thr, cv2.MORPH_OPEN, kernel, iterations=1)
     save(cv2.cvtColor(opened, cv2.COLOR_GRAY2BGR), "opened.png")
     res = try_decode_cv2(cv2.cvtColor(opened, cv2.COLOR_GRAY2BGR))
-    if res:
-        results.append(("cv2_open", res))
+    if res: results.append(("cv2_open", res))
     res2 = try_decode_pyzbar(cv2.cvtColor(opened, cv2.COLOR_GRAY2BGR))
-    if res2:
-        results.append(("pyzbar_open", res2))
+    if res2: results.append(("pyzbar_open", res2))
 
+    # 6. Deskew
     edges = cv2.Canny(gray, 50, 150)
     lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=100, maxLineGap=10)
     if lines is not None and len(lines) > 0:
@@ -188,28 +231,30 @@ def pipeline_attempts(img_bgr):
         deskew = imutils.rotate_bound(img_bgr, -median_angle)
         save(deskew, "deskewed.png")
         res = try_decode_cv2(deskew)
-        if res:
-            results.append(("cv2_deskew", res))
+        if res: results.append(("cv2_deskew", res))
         res2 = try_decode_pyzbar(deskew)
-        if res2:
-            results.append(("pyzbar_deskew", res2))
+        if res2: results.append(("pyzbar_deskew", res2))
 
     return results
 
+# ==== Funcția principală ====
 def main():
+    # verificăm dacă există fișierul
     if not os.path.exists(IN):
-        print(f"Input file '{IN}' not found. Pune distored_qr.png în directorul curent.")
+        print(f"Input file '{IN}' not found")
         return
     img = cv2.imread(IN)
     if img is None:
-        print("Nu pot citi imaginea (cv2.imread returned None). Verifică formatul.")
+        print("Cant read file, Check format")
         return
 
     print("Imagine încărcată:", IN)
     save(img, "original.png")
 
+    # rulăm pipeline
     results = pipeline_attempts(img)
 
+    # agregăm rezultatele
     found = {}
     for tag, res in results:
         if isinstance(res, list):
@@ -218,19 +263,14 @@ def main():
         else:
             found[res] = found.get(res, []) + [tag]
 
+    # afișăm rezultatele
     if found:
-        print("\n--- Decodări găsite ---")
         for text, methods in found.items():
             print("Decoded text:", text)
             print("Found by:", methods)
             print()
     else:
-        print("\nN-am reușit să decodăm automat. Ce poți încerca în continuare:")
-        print(" - Ajustează parametrii din funcțiile adaptive_threshold_and_morph și inpaint (block size, C, area threshold).")
-        print(" - Deschide imaginile salvate în folderul 'restoration_outputs' și inspectează ce pas arată cel mai promițător.")
-        print(" - Dacă ai acces la versiuni multiple ale imaginii (scansări diferite), rulează scriptul pe fiecare.")
-        print(" - Poți încerca upscale mai agresiv (scale=4) sau metode de super-resolution (cv2.dnn_superres).")
-        print(" - Dacă vrei, încarcă aici una dintre imaginile intermediare și încerc eu următorii pași.")
+        print("\nNot decoded")
 
 if __name__ == "__main__":
     main()
